@@ -146,26 +146,16 @@ if "search_results" not in st.session_state:
 
 
 # ── 약가 조회 헬퍼 ────────────────────────────────────────────
-def search_group_max(df: pd.DataFrame, ingredient: str, strength: str) -> tuple[int | None, pd.DataFrame]:
-    """성분명+함량으로 그룹 내 최고가 반환."""
-    mask = (
-        df["주성분명"].str.contains(ingredient, case=False, na=False) &
-        df["주성분명"].str.contains(strength,   case=False, na=False)
-    )
-    hits = df[mask]
-    if hits.empty:
-        return None, hits
-    # 첫 번째 매칭 제품의 그룹코드로 같은 그룹 전체 조회
-    group_code = hits.iloc[0]["그룹코드"]
-    group_df   = df[df["그룹코드"] == group_code]
-    max_price  = int(group_df["상한금액"].max())
-    return max_price, group_df
-
-
-def search_product_price(df: pd.DataFrame, product_name: str) -> pd.DataFrame:
-    """제품명으로 매칭 제품 목록 반환."""
+def search_unified(df: pd.DataFrame, product_name: str) -> pd.DataFrame:
+    """제품명으로 매칭 제품 목록 반환 (그룹코드 포함)."""
     mask = df["제품명"].str.contains(product_name, case=False, na=False)
-    return df[mask][["제품명", "업체명", "규격", "단위", "상한금액"]].head(20)
+    return df[mask][["제품명", "업체명", "규격", "단위", "상한금액", "그룹코드"]].head(20)
+
+
+def get_group_max_row(df: pd.DataFrame, group_code: str) -> pd.Series:
+    """그룹코드로 그룹 내 최고가 제품 행 반환."""
+    grp_df = df[df["그룹코드"] == group_code]
+    return grp_df.loc[grp_df["상한금액"].idxmax()]
 
 
 # ── 사이드바 ──────────────────────────────────────────────────
@@ -173,6 +163,16 @@ drug_df = load_drug_list() if DATA_PATH.exists() else None
 
 with st.sidebar:
     st.header("⚙️ 설정")
+
+    if DATA_PATH.exists():
+        with open(DATA_PATH, "rb") as _f:
+            st.download_button(
+                label="📥 요양급여 약제 데이터 원본 (2026-05-01)",
+                data=_f.read(),
+                file_name="drug_list_2026_05_01.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
     impl_month = st.slider("정책 시행 월", 1, 12, 10, format="%d월")
     mp = impl_month - 1
@@ -189,96 +189,62 @@ with st.sidebar:
 
         with st.expander(f"🔴 {p['name']}  (현재 {curr_pct:.0f}%)", expanded=(i == 0)):
 
-            # ── 약가 자동 조회 ──────────────────────────────
+            # ── 제품 검색 ──────────────────────────────────
             if drug_df is not None:
-                st.markdown("**🔍 약가 자동 조회**")
-
-                # 블록 A: 그룹 최고가
-                with st.container():
-                    st.caption("그룹 최고가 조회 (성분명 + 함량)")
-                    col_a1, col_a2 = st.columns(2)
-                    with col_a1:
-                        ing  = st.text_input("성분명", key=f"ing_{i}", placeholder="atorvastatin")
-                    with col_a2:
-                        strn = st.text_input("함량",   key=f"strn_{i}", placeholder="10mg")
-                    if st.button("최고가 조회", key=f"gbtn_{i}", use_container_width=True):
-                        if ing and strn:
-                            max_p, grp_df = search_group_max(drug_df, ing, strn)
-                            if max_p is not None:
-                                p["group_max_price"] = max_p
-                                st.session_state[f"gm_{i}"] = max_p
-                                st.session_state.search_results[f"grp_{i}"] = {
-                                    "max": max_p, "count": len(grp_df),
-                                    "ingredient": grp_df.iloc[0]["주성분명"],
-                                }
-                                st.rerun()
-                            else:
-                                st.warning("매칭 결과 없음 — 성분명/함량 확인 필요")
+                st.markdown("**🔍 제품 검색**")
+                prod_q = st.text_input(
+                    "제품명", key=f"uq_{i}",
+                    placeholder="예: 리피토, 코자, 아모잘탄",
+                )
+                if st.button("검색", key=f"ubtn_{i}", use_container_width=True):
+                    if prod_q:
+                        hits = search_unified(drug_df, prod_q)
+                        if not hits.empty:
+                            st.session_state.search_results[f"unified_{i}"] = hits
+                            st.rerun()
                         else:
-                            st.warning("성분명과 함량을 모두 입력하세요")
+                            st.warning("매칭 결과 없음 — 제품명을 확인하세요")
+                    else:
+                        st.warning("제품명을 입력하세요")
 
-                if f"grp_{i}" in st.session_state.search_results:
-                    r = st.session_state.search_results[f"grp_{i}"]
-                    st.success(
-                        f"✅ 그룹 최고가 **{r['max']:,}원** (그룹 내 {r['count']}개 제품)\n\n"
-                        f"주성분: {r['ingredient']}"
-                    )
-
-                st.divider()
-
-                # 블록 B: 내 제품 약가
-                with st.container():
-                    st.caption("내 제품 약가 조회 (제품명)")
-                    prod_q = st.text_input("제품명", key=f"prodq_{i}", placeholder="리피토")
-                    if st.button("제품 조회", key=f"pbtn_{i}", use_container_width=True):
-                        if prod_q:
-                            results = search_product_price(drug_df, prod_q)
-                            if not results.empty:
-                                st.session_state.search_results[f"prod_{i}"] = results
-                                st.rerun()
-                            else:
-                                st.warning("매칭 결과 없음 — 제품명 확인 필요")
-                        else:
-                            st.warning("제품명을 입력하세요")
-
-                if f"prod_{i}" in st.session_state.search_results:
-                    results = st.session_state.search_results[f"prod_{i}"]
-                    options = [
-                        f"{row['제품명']}  ({row['상한금액']:,}원)"
-                        for _, row in results.iterrows()
+                if f"unified_{i}" in st.session_state.search_results:
+                    hits = st.session_state.search_results[f"unified_{i}"]
+                    _opts = [
+                        f"{row['제품명']}  ({int(row['상한금액']):,}원)"
+                        for _, row in hits.iterrows()
                     ]
-                    sel_idx  = st.selectbox("제품 선택", range(len(options)),
-                                            format_func=lambda x: options[x],
-                                            key=f"psel_{i}")
-                    sel_row  = results.iloc[sel_idx]
-                    # 선택된 제품 정보 미리보기
-                    st.info(
-                        f"**{sel_row['제품명']}**\n\n"
-                        f"업체: {sel_row['업체명']}  |  규격: {sel_row['규격']} {sel_row['단위']}"
-                        f"  |  **상한금액: {int(sel_row['상한금액']):,}원**"
+                    sel_idx = st.selectbox(
+                        "제품 선택", range(len(_opts)),
+                        format_func=lambda x, o=_opts: o[x],
+                        key=f"usel_{i}",
                     )
-                    if st.button("✅ 이 제품으로 적용", key=f"papply_{i}", use_container_width=True):
-                        full_name  = sel_row["제품명"]
-                        clean_name = full_name.split("(")[0].strip()
-                        new_price  = int(sel_row["상한금액"])
-                        # 제품 별칭 & 현재가 — dict + 위젯 state 동시 업데이트
-                        p["name"]          = clean_name
-                        p["current_price"] = new_price
+                    sel_row = hits.iloc[sel_idx]
+                    gm_row  = get_group_max_row(drug_df, sel_row["그룹코드"])
+
+                    st.info(
+                        f"**선택 제품**\n\n"
+                        f"{sel_row['제품명']}\n\n"
+                        f"업체: {sel_row['업체명']}  |  규격: {sel_row['규격']} {sel_row['단위']}"
+                        f"  |  현재 약가: **{int(sel_row['상한금액']):,}원**"
+                    )
+                    st.success(
+                        f"**그룹 최고가 제품 ★**\n\n"
+                        f"{gm_row['제품명']}\n\n"
+                        f"업체: {gm_row['업체명']}  |  규격: {gm_row['규격']} {gm_row['단위']}"
+                        f"  |  그룹 최고가: **{int(gm_row['상한금액']):,}원**"
+                    )
+
+                    if st.button("✅ 이 제품으로 적용", key=f"uapply_{i}", use_container_width=True):
+                        clean_name    = sel_row["제품명"].split("(")[0].strip()
+                        new_price     = int(sel_row["상한금액"])
+                        grp_max_price = int(gm_row["상한금액"])
+                        p["name"]            = clean_name
+                        p["current_price"]   = new_price
+                        p["group_max_price"] = grp_max_price
                         st.session_state[f"nm_{i}"] = clean_name
                         st.session_state[f"cp_{i}"] = new_price
-                        # 동일 그룹 최고가 자동 조회 — dict + 위젯 state 동시 업데이트
-                        prod_rows = drug_df[drug_df["제품명"] == full_name]
-                        if not prod_rows.empty:
-                            grp_code = prod_rows.iloc[0]["그룹코드"]
-                            grp_df   = drug_df[drug_df["그룹코드"] == grp_code]
-                            grp_max  = int(grp_df["상한금액"].max())
-                            p["group_max_price"] = grp_max
-                            st.session_state[f"gm_{i}"] = grp_max
-                            st.session_state.search_results[f"grp_{i}"] = {
-                                "max": grp_max, "count": len(grp_df),
-                                "ingredient": grp_df.iloc[0]["주성분명"],
-                            }
-                        del st.session_state.search_results[f"prod_{i}"]
+                        st.session_state[f"gm_{i}"] = grp_max_price
+                        del st.session_state.search_results[f"unified_{i}"]
                         st.rerun()
 
                 st.divider()
